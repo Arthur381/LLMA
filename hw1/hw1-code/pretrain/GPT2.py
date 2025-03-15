@@ -7,6 +7,14 @@ import math
 import numpy as np
 import tiktoken
 
+
+'''set device'''
+device="cpu"
+if torch.cuda.is_available():
+    device="cuda"
+print(f"Using device: {device}.")
+
+
 @dataclass
 class GPTConfig:
     block_size: int=1024
@@ -111,11 +119,8 @@ class GPT(nn.Module):
 
 
     def forward(self,idx,targets=None):
-        B,T=idx.size()
         assert T<=self.config.block_size, f"Sequence with the length of {T} exceed the block_size"
-
         pos=torch.arange(0,T,dtype=torch.long,device=idx.device)
-
         pos_emb=self.transformer.position_embd(pos)
         tok_emb=self.transformer.token_embd(idx)
         x=tok_emb+pos_emb
@@ -132,14 +137,11 @@ class GPT(nn.Module):
 
         return logits,loss
 
-device="cpu"
-if torch.cuda.is_available():
-    device="cuda"
-print(f"Using device: {device}.")
+
 
 
 num_return_sequences=5
-max_length=30
+max_length=39
 
 model=GPT(GPTConfig())
 model.to(device)
@@ -157,9 +159,24 @@ tokens=enc.encode(text)
 # 4 batch are different from each other
 B,T=4,32
 buf=torch.tensor(tokens[:B*T+1])
-x=buf[:-1].view(B,T)
-y=buf[1:].view(B,T)
+# change shape and to device
+x=buf[:-1].view(B,T).to(device)
+y=buf[1:].view(B,T).to(device)
 
+'''load optimizer: Adam SGD'''
+optimizer=torch.optim.Adam(model.parameters(),lr=3e-4)
+for i in range(60):
+    optimizer.zero_grad()
+    logits,loss=model(x,y)
+    loss.backward()
+    # update parameters based on gradients 
+    optimizer.step()
+    # .item convert tensor to a single float
+    print(f"step {i}, loss: {loss.item()}")
+
+# print(loss)
+import sys
+sys.exit(0)
 # tokens=torch.tensor(tokens,dtype=torch.long)
 # copy(unsqueeze to batch size)
 # tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1)
@@ -171,9 +188,11 @@ torch.cuda.manual_seed(42)
 
 while x.size(1)<max_length:
     with torch.no_grad():
-        logits=model(x,y)
+        logits,loss=model(x,y)
         # (B,T,vocab_size) -> (B,vocab_size)
         logits=logits[:,-1,:]
+        print(loss)
+
 
         prob=F.softmax(logits,dim=-1)
         topk_probs,topk_indices=torch.topk(prob,50,dim=-1)
@@ -186,7 +205,7 @@ while x.size(1)<max_length:
         x=torch.cat((x,xcol),dim=1)
 
 
-for i in range(4):
+for i in range(3):
     tokens=x[i,:30].tolist()
     decoded=enc.decode(tokens)
     print(">",decoded)
