@@ -6,7 +6,7 @@ from torch.nn import functional as F
 import math
 import numpy as np
 import tiktoken
-
+import dataloader
 
 '''set device'''
 device="cpu"
@@ -101,6 +101,8 @@ class Block(nn.Module):
         x=x+self.mlp(self.ln_2(x))
         return x
     
+T=40
+B=5
 
 
 class GPT(nn.Module):
@@ -142,45 +144,33 @@ class GPT(nn.Module):
 
 num_return_sequences=5
 max_length=39
-
+epoch_num=50
 model=GPT(GPTConfig())
 model.to(device)
 
 # prompt="I am a good man."
 # tokens=enc.encode(prompt)
 # call gpt2 encoder
-enc=tiktoken.get_encoding('gpt2')
 
-with open('input.txt','r') as f:
-    text=f.read()
-text=text[:1000]
-tokens=enc.encode(text)
 
-# 4 batch are different from each other
-B,T=4,32
-buf=torch.tensor(tokens[:B*T+1])
-# change shape and to device
-x=buf[:-1].view(B,T).to(device)
-y=buf[1:].view(B,T).to(device)
-
+Train_loader=dataloader.DataLoaderLite(B,T)
 '''load optimizer: Adam SGD'''
 optimizer=torch.optim.Adam(model.parameters(),lr=3e-4)
-for i in range(60):
+for i in range(epoch_num):
     optimizer.zero_grad()
+    x,y=Train_loader.next_batch()
+    x=x.to(device)
+    y=y.to(device)
     logits,loss=model(x,y)
     loss.backward()
     # update parameters based on gradients 
     optimizer.step()
     # .item convert tensor to a single float
-    print(f"step {i}, loss: {loss.item()}")
+    print(f"epoch {i}, loss: {loss.item()}")
 
 # print(loss)
 import sys
 sys.exit(0)
-# tokens=torch.tensor(tokens,dtype=torch.long)
-# copy(unsqueeze to batch size)
-# tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1)
-# x=tokens.to(device)
 
 # set random seed
 torch.manual_seed(42)
