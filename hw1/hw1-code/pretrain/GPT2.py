@@ -33,7 +33,7 @@ class CausalSelfAttention(nn.Module):
         self.c_attn=nn.Linear(config.n_embd,config.n_embd*3)
 
         self.c_proj=nn.Linear(config.n_embd,config.n_embd)
-
+        self.c_proj.NANOGPT_SCALE_INIT=1
         self.n_head=config.n_head
         self.n_embd=config.n_embd
 
@@ -80,6 +80,9 @@ class MLP(nn.Module):
         # default parem is Cumulative Distribution Function for Gaussian Distribution.
         self.gelu=nn.GELU(approximate='tanh')
         self.c_proj=nn.Linear(config.n_embd*4,config.n_embd)
+        # use the flag, change the initialize std
+        # consider to layeres
+        self.c_proj.NANOGPT_SCALE_INIT=1
 
     def forward(self,x):
         x=self.c_fc(x)
@@ -101,8 +104,8 @@ class Block(nn.Module):
         x=x+self.mlp(self.ln_2(x))
         return x
     
-T=40
-B=5
+T=32
+B=50
 
 
 class GPT(nn.Module):
@@ -118,9 +121,28 @@ class GPT(nn.Module):
             ln_f=nn.LayerNorm(config.n_embd),
         ))
         self.lm_head=nn.Linear(config.n_embd,config.vocab_size,bias=False)
+        # share token_embd parameter to output embedding
+        # a single tensor
+        self.transformer.token_embd.weight=self.lm_head.weight
+        self.apply(self._init_weight)
+
+
+    def _init_weight(self,module):
+        if isinstance(module,nn.Linear):
+            std=0.02
+            if hasattr(module,'NANOGPT_SCALE_INIT'):
+                # there are 2*layer_num layers actually
+                std*=(2*self.config.n_layer)**-0.5
+            torch.nn.init.normal_(module.weight,mean=0.0,std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module,nn.Embedding):
+            torch.nn.init.normal_(module.weight,mean=0.0,std=0.02)
 
 
     def forward(self,idx,targets=None):
+        
+        B,T=idx.size()
         assert T<=self.config.block_size, f"Sequence with the length of {T} exceed the block_size"
         pos=torch.arange(0,T,dtype=torch.long,device=idx.device)
         pos_emb=self.transformer.position_embd(pos)
@@ -129,6 +151,7 @@ class GPT(nn.Module):
         # let x go through 12 layers
         for block in self.transformer.h:
             x=block(x)
+
         # Layernorm
         x=self.transformer.ln_f(x)
         # classifier
@@ -147,28 +170,25 @@ max_length=39
 epoch_num=50
 model=GPT(GPTConfig())
 model.to(device)
-
-# prompt="I am a good man."
-# tokens=enc.encode(prompt)
-# call gpt2 encoder
-
-
 Train_loader=dataloader.DataLoaderLite(B,T)
 '''load optimizer: Adam SGD'''
 optimizer=torch.optim.Adam(model.parameters(),lr=3e-4)
-for i in range(epoch_num):
-    optimizer.zero_grad()
-    x,y=Train_loader.next_batch()
-    x=x.to(device)
-    y=y.to(device)
-    logits,loss=model(x,y)
-    loss.backward()
-    # update parameters based on gradients 
-    optimizer.step()
-    # .item convert tensor to a single float
-    print(f"epoch {i}, loss: {loss.item()}")
 
-# print(loss)
+def training():
+    for i in range(epoch_num):
+        optimizer.zero_grad()
+        x,y=Train_loader.next_batch()
+        x=x.to(device)
+        y=y.to(device)
+        
+        logits,loss=model(x,y)
+        loss.backward()
+        # update parameters based on gradients 
+        optimizer.step()
+        # .item convert tensor to a single float
+        print(f"epoch {i}, loss: {loss.item()}")
+
+training()
 import sys
 sys.exit(0)
 
@@ -191,7 +211,6 @@ while x.size(1)<max_length:
         ix=torch.multinomial(topk_probs,1)
         # get specific token with its index 
         xcol=torch.gather(topk_indices,-1,ix)
-
         x=torch.cat((x,xcol),dim=1)
 
 
