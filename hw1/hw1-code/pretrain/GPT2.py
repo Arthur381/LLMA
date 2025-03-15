@@ -5,7 +5,7 @@ from torch.nn import functional as F
 
 import math
 import numpy as np
-
+import tiktoken
 
 @dataclass
 class GPTConfig:
@@ -101,8 +101,7 @@ class GPT(nn.Module):
         super().__init__()
         self.config=config
 
-        self.transformer=nn.ModuleDict
-        (dict(
+        self.transformer=nn.ModuleDict(dict(
             token_embd=nn.Embedding(config.vocab_size,config.n_embd),
             position_embd=nn.Embedding(config.block_size,config.n_embd),
             h=nn.ModuleList([Block(config) for i in range(config.n_layer)]),
@@ -142,11 +141,23 @@ max_length=30
 model=GPT(GPTConfig())
 model.to(device)
 
-x="I am a good man."
+prompt="I am a good man."
+
+# call gpt2 encoder
+enc=tiktoken.get_encoding('gpt2')
+tokens=enc.encode(prompt)
+tokens=torch.tensor(tokens,dtype=torch.long)
+# copy(unsqueeze to batch size)
+tokens=tokens.unsqueeze(0).repeat(num_return_sequences,1)
+x=tokens.to(device)
+
+
+
 
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)
-while x.size()<max_length:
+
+while x.size(1)<max_length:
     with torch.no_grad():
 
         logits=model(x)
@@ -157,8 +168,14 @@ while x.size()<max_length:
         topk_probs,topk_indices=torch.topk(prob,50,dim=-1)
         # select a token fron the distribution
         # Randomly sample index 
-        ix=torch.multinomial(topk_probs,-1)
+        ix=torch.multinomial(topk_probs,1)
         # get specific token with its index 
         xcol=torch.gather(topk_indices,-1,ix)
 
         x=torch.cat((x,xcol),dim=1)
+
+
+for i in range(num_return_sequences):
+    tokens=x[i,:30].tolist()
+    decoded=enc.decode(tokens)
+    print(">",decoded)
