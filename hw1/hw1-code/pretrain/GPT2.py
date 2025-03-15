@@ -68,11 +68,10 @@ class CausalSelfAttention(nn.Module):
 class MLP(nn.Module):
     def __init__(self,config):
         super().__init__()
-        self.c_fc=nn.Linear(config.N_embd,4*config.n_embd)
+        self.c_fc=nn.Linear(config.n_embd,4*config.n_embd)
         # default parem is Cumulative Distribution Function for Gaussian Distribution.
-        nn.GEL
         self.gelu=nn.GELU(approximate='tanh')
-        self.c_proj=nn.Linear(config.N_embd*4,config.n_embd)
+        self.c_proj=nn.Linear(config.n_embd*4,config.n_embd)
 
     def forward(self,x):
         x=self.c_fc(x)
@@ -131,3 +130,35 @@ class GPT(nn.Module):
 
         return x
 
+device="cpu"
+if torch.cuda.is_available():
+    device="cuda"
+print(f"Using device: {device}.")
+
+
+num_return_sequences=5
+max_length=30
+
+model=GPT(GPTConfig())
+model.to(device)
+
+x="I am a good man."
+
+torch.manual_seed(42)
+torch.cuda.manual_seed(42)
+while x.size()<max_length:
+    with torch.no_grad():
+
+        logits=model(x)
+        # (B,T,vocab_size) -> (B,vocab_size)
+        logits=logits[:,-1,:]
+
+        prob=F.softmax(logits,dim=-1)
+        topk_probs,topk_indices=torch.topk(prob,50,dim=-1)
+        # select a token fron the distribution
+        # Randomly sample index 
+        ix=torch.multinomial(topk_probs,-1)
+        # get specific token with its index 
+        xcol=torch.gather(topk_indices,-1,ix)
+
+        x=torch.cat((x,xcol),dim=1)
