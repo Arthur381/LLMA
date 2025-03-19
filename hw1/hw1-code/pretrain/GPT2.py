@@ -14,6 +14,9 @@ if torch.cuda.is_available():
     device="cuda"
 print(f"Using device: {device}.")
 
+class TanhGeLU(nn.Module):
+    def forward(self,input):
+        return 0.5*input*(1.0+torch.tanh(math.sqrt(2.0/math.pi)*(input+0.044715*torch.pow(input,3.0))))
 
 @dataclass
 class GPTConfig:
@@ -31,7 +34,6 @@ class CausalSelfAttention(nn.Module):
         # the dimension include Q,K,V
         # every embeding has its q,k,v
         self.c_attn=nn.Linear(config.n_embd,config.n_embd*3)
-
         self.c_proj=nn.Linear(config.n_embd,config.n_embd)
         self.c_proj.NANOGPT_SCALE_INIT=1
         self.n_head=config.n_head
@@ -57,11 +59,12 @@ class CausalSelfAttention(nn.Module):
 
         # sqrt(d_k), in case big dimension lead to big digits
         # each head query and match it's corresponding K
-        att=(Q@K.transpose(-2,-1)*(1.0/math.sqrt(K.size(-1))))
+
+
         
+        att=(Q@K.transpose(-2,-1)*(1.0/math.sqrt(K.size(-1))))
         # use mask to change future Q@V^T to -inf, ensure the softmax become zero
         att=att.masked_fill(self.bias[:,:,:T,:T]==0,float('-inf'))
-
         att=F.softmax(att,dim=-1)
         y=att@V
 
@@ -104,9 +107,6 @@ class Block(nn.Module):
         x=x+self.mlp(self.ln_2(x))
         return x
     
-T=32
-B=50
-
 
 class GPT(nn.Module):
 
@@ -162,35 +162,41 @@ class GPT(nn.Module):
 
         return logits,loss
 
-
-
-
-num_return_sequences=5
-max_length=39
+import time
+T,B=128,16
+#num_return_sequences=5
+#max_length=39
 epoch_num=50
 model=GPT(GPTConfig())
 model.to(device)
+#model=torch.compile(model)
 Train_loader=dataloader.DataLoaderLite(B,T)
 '''load optimizer: Adam SGD'''
 optimizer=torch.optim.Adam(model.parameters(),lr=3e-4)
 
 def training():
     for i in range(epoch_num):
-        optimizer.zero_grad()
+        t0=time.time()
         x,y=Train_loader.next_batch()
         x=x.to(device)
         y=y.to(device)
-        
-        logits,loss=model(x,y)
+        optimizer.zero_grad()
+        with torch.autocast(device_type=device,dtype=torch.float16):
+            logits,loss=model(x,y)
+            #import code; code.interact(local=locals())
         loss.backward()
         # update parameters based on gradients 
         optimizer.step()
+        t1=time.time()
+        dt=(t1-t0)*1000
+        token_per_sec=(Train_loader.B*Train_loader.T)/(t1-t0)
         # .item convert tensor to a single float
-        print(f"epoch {i}, loss: {loss.item()}")
+        print(f"epoch {i}, loss: {loss.item()}, tokens per second: {token_per_sec}")
 
 training()
 import sys
 sys.exit(0)
+
 
 # set random seed
 torch.manual_seed(42)
