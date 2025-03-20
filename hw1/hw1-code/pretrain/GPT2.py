@@ -61,13 +61,13 @@ class CausalSelfAttention(nn.Module):
         # each head query and match it's corresponding K
 
 
-        
         att=(Q@K.transpose(-2,-1)*(1.0/math.sqrt(K.size(-1))))
         # use mask to change future Q@V^T to -inf, ensure the softmax become zero
         att=att.masked_fill(self.bias[:,:,:T,:T]==0,float('-inf'))
         att=F.softmax(att,dim=-1)
         y=att@V
-
+        # Flash attention
+        # y=F.scaled_dot_product_attention(Q,K,V,is_causal=True)
         # y:(B,head,T,d_k)-> y:(B,T,head,d_k)
         y=y.transpose(1,2).contiguous().view(B,T,C)
 
@@ -154,7 +154,7 @@ class GPT(nn.Module):
 
         # Layernorm
         x=self.transformer.ln_f(x)
-        # classifier
+        # classifier 
         logits=self.lm_head(x)
         loss=None
         if targets is not None:
@@ -167,15 +167,31 @@ T,B=128,16
 #num_return_sequences=5
 #max_length=39
 epoch_num=50
-model=GPT(GPTConfig())
+model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-#model=torch.compile(model)
+# model=torch.compile(model)
 Train_loader=dataloader.DataLoaderLite(B,T)
 '''load optimizer: Adam SGD'''
-optimizer=torch.optim.Adam(model.parameters(),lr=3e-4)
+optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
+
+max_lr=3e-4
+min_lr=max_lr*0.1
+warmup_steps=10
+max_steps=50
+
+def get_lr(iter_time):
+    if iter_time<warmup_steps:
+        return max_lr*(iter_time+1)/warmup_steps
+    if iter_time>max_steps:
+        return min_lr
+    # use cosin decay to drop down lr
+    decay_ratio=(iter_time-warmup_steps)/(max_steps-warmup_steps)
+    assert 0<=decay_ratio<=1
+    coeff=0.5*(1.0+math.cos(math.pi*decay_ratio))
+    return min_lr+coeff*(max_lr-min_lr)
 
 def training():
-    for i in range(epoch_num):
+    for step in range(max_steps):
         t0=time.time()
         x,y=Train_loader.next_batch()
         x=x.to(device)
@@ -185,13 +201,22 @@ def training():
             logits,loss=model(x,y)
             #import code; code.interact(local=locals())
         loss.backward()
+        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+        
+        lr=get_lr(step)
+        # set learning rate
+        for param_group in optimizer.param_groups:
+            param_group['lr']=lr
+
+
         # update parameters based on gradients 
         optimizer.step()
+        torch.cuda.synchronize()# wait for gpu to finish work
         t1=time.time()
         dt=(t1-t0)*1000
         token_per_sec=(Train_loader.B*Train_loader.T)/(t1-t0)
         # .item convert tensor to a single float
-        print(f"epoch {i}, loss: {loss.item()}, tokens per second: {token_per_sec}")
+        print(f"step {step} | loss: {loss.item():.6f} | norm={norm:.4f} | dt is {dt:.4f} | tokens per sec: {token_per_sec:.2f}")
 
 training()
 import sys
