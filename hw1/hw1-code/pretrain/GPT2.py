@@ -2,11 +2,13 @@ from dataclasses import dataclass
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-
+import time
 import math
 import numpy as np
 import tiktoken
 import dataloader
+import inspect
+import sys
 
 '''set device'''
 device="cpu"
@@ -162,8 +164,37 @@ class GPT(nn.Module):
 
         return logits,loss
 
-import time
+    def configure_optimizers(self, weight_decay, learning_rate, device):
+        # get candidate parameters which need gradients
+        param_dict = {pn: p for pn, p in self.named_parameters()}
+        param_dict = {pn: p for pn, p in param_dict.items() if p.requires_grad}
+        # create optim groups. Any parameters that is 2D will be weight decayed, otherwise no.
+        # i.e. all weight tensors in matmuls + embeddings decay, all biases and layernorms don't.
+        decay_params = [p for n, p in param_dict.items() if p.dim() >= 2]
+        # one dimension
+        nodecay_params = [p for n, p in param_dict.items() if p.dim() < 2]
+        optim_groups = [
+            {'params': decay_params, 'weight_decay': weight_decay},
+            {'params': nodecay_params, 'weight_decay': 0.0}
+        ]
+        num_decay_params = sum(p.numel() for p in decay_params)
+        num_nodecay_params = sum(p.numel() for p in nodecay_params)
+        print(f"num decayed parameter tensors: {len(decay_params)}, with {num_decay_params:,} parameters")
+        print(f"num non-decayed parameter tensors: {len(nodecay_params)}, with {num_nodecay_params:,} parameters")
+        # Create AdamW optimizer and use the fused version if it is available
+        fused_available = 'fused' in inspect.signature(torch.optim.AdamW).parameters
+        use_fused = fused_available and device == 'cuda'
+        optimizer = torch.optim.AdamW(optim_groups, lr=learning_rate, betas=(0.9,0.95), eps=1e-8)
+        print(f"using fused AdamW: {use_fused}")
+        return optimizer
+
+
+total_batch_size=524288 # the power of 2 is better.
+
 T,B=128,16
+
+grad_accu_steps=total_batch_size//(B*T) # need grad_accu_steps forward times 
+
 #num_return_sequences=5
 #max_length=39
 epoch_num=50
@@ -172,7 +203,10 @@ model.to(device)
 # model=torch.compile(model)
 Train_loader=dataloader.DataLoaderLite(B,T)
 '''load optimizer: Adam SGD'''
-optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
+# optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
+'''use my own defined optimizer'''
+optimizer=model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
+
 
 max_lr=3e-4
 min_lr=max_lr*0.1
@@ -193,33 +227,37 @@ def get_lr(iter_time):
 def training():
     for step in range(max_steps):
         t0=time.time()
-        x,y=Train_loader.next_batch()
-        x=x.to(device)
-        y=y.to(device)
+        loss_accum=0.0
         optimizer.zero_grad()
-        with torch.autocast(device_type=device,dtype=torch.float16):
-            logits,loss=model(x,y)
-            #import code; code.interact(local=locals())
-        loss.backward()
+        for iter in range(grad_accu_steps):
+            x,y=Train_loader.next_batch()
+            x=x.to(device)
+            y=y.to(device)
+            with torch.autocast(device_type=device,dtype=torch.float16):
+                logits,loss=model(x,y)
+            loss=loss/grad_accu_steps
+            loss_accum+=loss.detach()
+            loss.backward()
         norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
         
         lr=get_lr(step)
         # set learning rate
         for param_group in optimizer.param_groups:
             param_group['lr']=lr
-
-
         # update parameters based on gradients 
         optimizer.step()
         torch.cuda.synchronize()# wait for gpu to finish work
         t1=time.time()
         dt=(t1-t0)*1000
-        token_per_sec=(Train_loader.B*Train_loader.T)/(t1-t0)
+        token_per_sec=(Train_loader.B*Train_loader.T)*grad_accu_steps/(t1-t0)
         # .item convert tensor to a single float
         print(f"step {step} | loss: {loss.item():.6f} | norm={norm:.4f} | dt is {dt:.4f} | tokens per sec: {token_per_sec:.2f}")
 
 training()
-import sys
+
+
+###############################################################
+
 sys.exit(0)
 
 
