@@ -16,6 +16,9 @@ import sys
 import os
 
 
+'''tokenizer'''
+enc=tiktoken.get_encoding('gpt2')
+
 '''
 set Distributed Data Parallel
 '''
@@ -240,11 +243,11 @@ min_lr=max_lr*0.1
 warmup_steps=175
 max_steps=50
 Train_loader=dataloader.DataLoaderLite(B,T,process_rank=ddp_rank,num_processes=ddp_world_size,split="train")
+val_loader=dataloader.DataLoaderLite(B,T,process_rank=ddp_rank,num_processes=ddp_world_size,split="val")
 # load optimizer: Adam SGD
 # optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
 '''use my own defined optimizer'''
 optimizer=raw_model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
-
 
 def get_lr(iter_time):
     if iter_time<warmup_steps:
@@ -260,6 +263,59 @@ def get_lr(iter_time):
 def training():
     for step in range(max_steps):
         t0=time.time()
+        '''
+        once in a while, evaluate validation loss
+        to see how much overfitting
+        '''
+        if step%100==0:
+            model.eval()
+            val_loader.reset()
+            with torch.no_grad():
+                val_loss_accum=0.0
+                val_loss_steps=20
+                for _ in range(val_loss_steps):
+                    x,y=val_loader.next_batch()
+                    x=x.to(device)
+                    y=y.to(device)
+                    with torch.autocast(device_type=device,dtype=torch.float16): # change dtype to speed up
+                        logits,loss=model(x,y)
+                    loss=loss/grad_accu_steps
+                    val_loss_accum+=loss.detach() # loss_accum is only used to analyse average loss
+            if ddp: # if ddp, every rank will have loss_accum: get average accumulate loss 
+                dist.all_reduce(val_loss_accum,op=dist.ReduceOp.AVG)
+            if master_process:
+                print(f"Validation loss: {val_loss_accum.item():.4f}")
+
+        '''
+        once in a while general samples
+        '''
+        if step>0 and step%100==0:
+            num_return_seq=4
+            max_length=32
+            tokens=enc.encode("Hello, I love LLM and Alignment.")
+            tokens=torch.tensor(tokens,dtype=torch.long)
+            tokens=tokens.unsqueeze(0).repeat(num_return_seq,1)
+            xgen=tokens.to(device)
+            sample_rng=torch.Generator(device=device)
+            # set different random seed for diff process
+            sample_rng.manual_seed(42+ddp_rank)
+            while xgen.size(1)<max_length:
+                with torch.no_grad():
+                    logits,loss=model(xgen)
+                    logits=logits[:,-1,:]# (B,vocab_size)
+                    prob=F.softmax(logits,dim=-1)
+                    topk_probs,topk_indices=torch.topk(prob,50,dim=-1)
+                    ix=torch.multinomial(topk_probs,1,sample_rng)
+                    # get specific token with its index 
+                    xcol=torch.gather(topk_indices,-1,ix)
+                    xgen=torch.cat((xgen,xcol),dim=1)
+            for i in range(num_return_seq):
+                tokens=xgen[i:max_length].tolist()
+                decoded=enc.decode(tokens)
+                print(f"rank {ddp_rank} sample {i}: {decoded}")
+
+
+        '''training loop'''
         loss_accum=0.0
         optimizer.zero_grad()
 
@@ -292,38 +348,9 @@ def training():
         if master_process:
             print(f"step {step} | loss: {loss.item():.6f} | norm={norm:.4f} | dt is {dt:.4f} | tokens per sec: {token_per_sec:.2f}")
 
+ 
 training()
-
-
 if ddp:
     destroy_process_group()
 
 sys.exit(0)
-
-###############################################################
-# set random seed
-torch.manual_seed(42)
-torch.cuda.manual_seed(42)
-
-while x.size(1)<max_length:
-    with torch.no_grad():
-        logits,loss=model(x,y)
-        # (B,T,vocab_size) -> (B,vocab_size)
-        logits=logits[:,-1,:]
-        print(loss)
-
-
-        prob=F.softmax(logits,dim=-1)
-        topk_probs,topk_indices=torch.topk(prob,50,dim=-1)
-        # select a token fron the distribution
-        # Randomly sample index 
-        ix=torch.multinomial(topk_probs,1)
-        # get specific token with its index 
-        xcol=torch.gather(topk_indices,-1,ix)
-        x=torch.cat((x,xcol),dim=1)
-
-
-for i in range(3):
-    tokens=x[i,:30].tolist()
-    decoded=enc.decode(tokens)
-    print(">",decoded)

@@ -29,8 +29,7 @@ class DataLoaderLite:
         if master_process:
             print(f"find {len(shards)} shards for split {split}.")
 
-        self.current_shard=0
-        self.tokens=load_tokens(self.shards[self.current_shard])
+        self.reset()
         '''
         with open('input.txt','r') as f:
             text=f.read()
@@ -40,8 +39,13 @@ class DataLoaderLite:
         print(f"loadded {len(self.tokens)} tokens")
         print(f"1 epoch = {len(self.tokens) // (B*T)} batchs")'
         '''
+    
+    def reset(self):
+        self.current_shard=0
+        self.tokens=load_tokens(self.shards[self.current_shard])
         # state
         self.current_position=self.B*self.T*self.process_rank
+
 
     def next_batch(self):
         B,T=self.B,self.T
