@@ -233,13 +233,13 @@ model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model=torch.compile(model)
 if ddp:
-    model=DDP(model,device_ids=[ddp_local_rank])
+    model=DDP(model,device_ids=[ddp_local_rank]) # here need local rank
 raw_model=model.module if ddp else model
 max_lr=3e-4
 min_lr=max_lr*0.1
-warmup_steps=10
+warmup_steps=175
 max_steps=50
-Train_loader=dataloader.DataLoaderLite(B,T)
+Train_loader=dataloader.DataLoaderLite(B,T,process_rank=ddp_rank,num_processes=ddp_world_size,split="train")
 # load optimizer: Adam SGD
 # optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
 '''use my own defined optimizer'''
