@@ -1,7 +1,11 @@
 from dataclasses import dataclass
-import torch
-import torch.nn as nn
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed import init_process_group,destroy_process_group
 from torch.nn import functional as F
+
+import torch
+import torch.distributed as dist
+import torch.nn as nn
 import time
 import math
 import numpy as np
@@ -9,12 +13,37 @@ import tiktoken
 import dataloader
 import inspect
 import sys
+import os
 
-'''set device'''
-device="cpu"
-if torch.cuda.is_available():
-    device="cuda"
-print(f"Using device: {device}.")
+
+'''
+set Distributed Data Parallel
+'''
+ddp = int(os.environ.get('RANK', -1)) != -1 # is this a ddp run?
+if ddp:
+    assert torch.cuda.is_available()
+    init_process_group(backend='nccl')
+    # rank multi device
+    # we want them to run different data
+    ddp_rank = int(os.environ['RANK'])
+    ddp_local_rank = int(os.environ['LOCAL_RANK'])
+    ddp_world_size = int(os.environ['WORLD_SIZE'])
+    device = f'cuda:{ddp_local_rank}'
+    torch.cuda.set_device(device)
+    master_process = ddp_rank == 0
+else:
+    # if not ddp, we are running on a single gpu, and one process
+    ddp_rank=0
+    ddp_local_rank=0
+    ddp_world_size=1
+    master_process=True
+    device="cpu"
+    if torch.cuda.is_available():
+        device="cuda"
+    print(f"Using device: {device}.")
+# instead use "python", use "torchrun"
+
+
 
 class TanhGeLU(nn.Module):
     def forward(self,input):
@@ -192,26 +221,30 @@ class GPT(nn.Module):
 total_batch_size=524288 # the power of 2 is better.
 
 T,B=128,16
-
-grad_accu_steps=total_batch_size//(B*T) # need grad_accu_steps forward times 
+grad_accu_steps=total_batch_size//(B*T*ddp_world_size) # need grad_accu_steps forward times 
+if master_process:
+    print(f"total desired batch size: {total_batch_size}")
+    print(f"calculate accumulated gradient steps: {grad_accu_steps}")
 
 #num_return_sequences=5
 #max_length=39
 epoch_num=50
 model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
-# model=torch.compile(model)
-Train_loader=dataloader.DataLoaderLite(B,T)
-'''load optimizer: Adam SGD'''
-# optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
-'''use my own defined optimizer'''
-optimizer=model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
-
-
+model=torch.compile(model)
+if ddp:
+    model=DDP(model,device_ids=[ddp_local_rank])
+raw_model=model.module if ddp else model
 max_lr=3e-4
 min_lr=max_lr*0.1
 warmup_steps=10
 max_steps=50
+Train_loader=dataloader.DataLoaderLite(B,T)
+# load optimizer: Adam SGD
+# optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
+'''use my own defined optimizer'''
+optimizer=raw_model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
+
 
 def get_lr(iter_time):
     if iter_time<warmup_steps:
@@ -229,19 +262,24 @@ def training():
         t0=time.time()
         loss_accum=0.0
         optimizer.zero_grad()
-        for iter in range(grad_accu_steps):
+
+        for iter in range(grad_accu_steps):  # for a mini batch
             x,y=Train_loader.next_batch()
             x=x.to(device)
             y=y.to(device)
-            with torch.autocast(device_type=device,dtype=torch.float16):
+            with torch.autocast(device_type=device,dtype=torch.float16): # change dtype to speed up
                 logits,loss=model(x,y)
             loss=loss/grad_accu_steps
-            loss_accum+=loss.detach()
+            loss_accum+=loss.detach() # loss_accum is only used to analyse average loss
+            if ddp: # synchronize gradient at last step
+                model.require_backward_grad_sync(iter==grad_accu_steps-1)
             loss.backward()
-        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
         
+        if ddp: # if ddp, every rank will have loss_accum: get average accumulate loss 
+            dist.all_reduce(loss_accum,op=dist.ReduceOp.AVG)
+        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.0)
+        # dynamically change learning rate
         lr=get_lr(step)
-        # set learning rate
         for param_group in optimizer.param_groups:
             param_group['lr']=lr
         # update parameters based on gradients 
@@ -249,18 +287,20 @@ def training():
         torch.cuda.synchronize()# wait for gpu to finish work
         t1=time.time()
         dt=(t1-t0)*1000
-        token_per_sec=(Train_loader.B*Train_loader.T)*grad_accu_steps/(t1-t0)
+        token_per_sec=(Train_loader.B*Train_loader.T)*grad_accu_steps*ddp_world_size/(t1-t0)
         # .item convert tensor to a single float
-        print(f"step {step} | loss: {loss.item():.6f} | norm={norm:.4f} | dt is {dt:.4f} | tokens per sec: {token_per_sec:.2f}")
+        if master_process:
+            print(f"step {step} | loss: {loss.item():.6f} | norm={norm:.4f} | dt is {dt:.4f} | tokens per sec: {token_per_sec:.2f}")
 
 training()
 
 
-###############################################################
+if ddp:
+    destroy_process_group()
 
 sys.exit(0)
 
-
+###############################################################
 # set random seed
 torch.manual_seed(42)
 torch.cuda.manual_seed(42)

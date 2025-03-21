@@ -26,4 +26,4 @@
 7. 遇到字符串 “<|endoftext|>” 时突然中断的原因：``<|endoftext|>`` 是 tokenizer 中的 Special tokens ，代表序列的终结。 ``<|endoftext|>`` encode 后的 Token使大模型认为输入终止。
 8. 关于 “SolidGoldMagikarp” 的问题时 LLM 会崩溃：如 SolidgoldMagikarp 等词在在训练集中从未出现，相应的 Neuron 从未激活，在初始化阶段是任意的，从未更新过。所以输入后会产生错误输出。
 9. 使用 LLM 时应该更倾向于使用 YAML 而不是 JSON：``YAML`` 格式文件的储存密度比 JSON 高。
-10. 不是端到端的原因：LLM 处理的是 Token 输出的也是 Token，这些 Token 都需要 Tokenizer 来处理成为与人来交互的文本。
+10. 不是端到端的原因：LLM 处理的是 Token 输出的也是 Token，这些 Token 都需要 Tokenizer 来处理成为与人来交互的文本。 
