@@ -50,13 +50,12 @@ class DataLoaderLite:
     def next_batch(self):
         B,T=self.B,self.T
         buf=self.tokens[self.current_position: self.current_position+B*T+1]
-
         # change shape and to device
+        # fit for next token generation
         x=buf[:-1].view(B,T)
         y=buf[1:].view(B,T)
         # move forward
         self.current_position+=B*T*self.num_processes
-
         # if won to the end, reset
         if self.current_position+(B*T*self.num_processes+1)>len(self.tokens):
             self.current_position=0

@@ -221,31 +221,40 @@ class GPT(nn.Module):
         return optimizer
 
 
-total_batch_size=524288 # the power of 2 is better.
 
-T,B=128,16
+'''
+hyperparameters:
+1 epoch has 'max_steps*total_batch_size=10B' tokens to train.
+'''
+total_batch_size=524288 # the power of 2 is better.  0.5 Million
+B=16
+T=128
 grad_accu_steps=total_batch_size//(B*T*ddp_world_size) # need grad_accu_steps forward times 
 if master_process:
     print(f"total desired batch size: {total_batch_size}")
     print(f"calculate accumulated gradient steps: {grad_accu_steps}")
-
-#num_return_sequences=5
-#max_length=39
-epoch_num=50
+epoch_num=4
 model=GPT(GPTConfig(vocab_size=50304))
 model.to(device)
 model=torch.compile(model)
+python_compile=True
 if ddp:
     model=DDP(model,device_ids=[ddp_local_rank]) # here need local rank
 raw_model=model.module if ddp else model
-max_lr=3e-4
+max_lr=6e-4
 min_lr=max_lr*0.1
-warmup_steps=175
-max_steps=50
+warmup_steps=715
+max_steps=19073
+log_file="file_name"
+log_dir="root"
+
+
+
+'''create data loader'''
 Train_loader=dataloader.DataLoaderLite(B,T,process_rank=ddp_rank,num_processes=ddp_world_size,split="train")
 val_loader=dataloader.DataLoaderLite(B,T,process_rank=ddp_rank,num_processes=ddp_world_size,split="val")
-# load optimizer: Adam SGD
-# optimizer=torch.optim.AdamW(model.parameters(),lr=3e-4,betas=(0.9,0.95),eps=1e-8)
+ 
+
 '''use my own defined optimizer'''
 optimizer=raw_model.configure_optimizers(weight_decay=0.1,learning_rate=6e-4,device=device)
 
@@ -261,11 +270,14 @@ def get_lr(iter_time):
     return min_lr+coeff*(max_lr-min_lr)
 
 def training():
+
+
+    ''' One step is a batch'''
     for step in range(max_steps):
         t0=time.time()
+        last_step=(step==max_steps-1)
         '''
-        once in a while, evaluate validation loss
-        to see how much overfitting
+        once in a while, evaluate validation loss to see how much overfitting
         '''
         if step%100==0:
             model.eval()
@@ -279,17 +291,30 @@ def training():
                     y=y.to(device)
                     with torch.autocast(device_type=device,dtype=torch.float16): # change dtype to speed up
                         logits,loss=model(x,y)
-                    loss=loss/grad_accu_steps
+                    loss=loss/val_loss_steps
                     val_loss_accum+=loss.detach() # loss_accum is only used to analyse average loss
             if ddp: # if ddp, every rank will have loss_accum: get average accumulate loss 
                 dist.all_reduce(val_loss_accum,op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"Validation loss: {val_loss_accum.item():.4f}")
+                with open(log_file,'a') as f:
+                    f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                if step>0 and (step%5000==0 or last_step):
+                    checkpoint_path=os.path.join(log_dir,f"model_{step:05d}.pt")
+                    checkpoint={
+                        'model':raw_model.state_dict(),
+                        'config':raw_model.config(),
+                        'step':step,
+                        'val_loss':val_loss_accum.item()
+                    }
+                    torch.save(checkpoint,checkpoint_path)
 
         '''
         once in a while general samples
         '''
-        if step>0 and step%100==0:
+        
+        if (not python_compile) and (last_step or step%250== 0):
+            model.eval()
             num_return_seq=4
             max_length=32
             tokens=enc.encode("Hello, I love LLM and Alignment.")
@@ -316,9 +341,9 @@ def training():
 
 
         '''training loop'''
+        model.train()
         loss_accum=0.0
         optimizer.zero_grad()
-
         for iter in range(grad_accu_steps):  # for a mini batch
             x,y=Train_loader.next_batch()
             x=x.to(device)
